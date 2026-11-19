@@ -1,59 +1,52 @@
 name: Build LWJGL 3.4.3 for iOS (arm64)
 
 on:
-  workflow_dispatch: # 手動実行ボタンを有効化
+  workflow_dispatch:
 
 jobs:
   build-ios-dylib:
-    runs-on: macos-15 # Apple Silicon (arm64) + Xcode 搭載環境
+    runs-on: macos-15
 
     steps:
-      - name: Checkout repository
+      - name: Checkout workflow repo
         uses: actions/checkout@v4
 
-      - name: Setup Java 21 (for LWJGL build tools)
+      - name: Checkout LWJGL 3.4.3 source
+        uses: actions/checkout@v4
+        with:
+          repository: LWJGL/lwjgl3
+          ref: '3.4.3'
+          path: lwjgl3
+
+      - name: Setup Java 21
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
           java-version: '21'
 
-      - name: Install build dependencies (Ant, CMake, Ninja)
+      - name: Install build dependencies
         run: |
           brew install ant cmake ninja
 
-      - name: Clone LWJGL 3.4.3 source
+      - name: Initialize LWJGL build
+        working-directory: lwjgl3
         run: |
-          git clone --branch 3.4.3 --depth 1 https://github.com
-          cd lwjgl3
           ant init
 
-      - name: Configure iOS SDK & Cross-Compile Flags
+      - name: Build LWJGL Java classes and generated C headers
+        working-directory: lwjgl3
         run: |
-          cd lwjgl3
-          IOS_SDK=$(xcrun --sdk iphoneos --show-sdk-path)
-          echo "IOS_SDK=$IOS_SDK" >> $GITHUB_ENV
-
-          # macOS向けビルド設定をiOS (arm64-apple-ios) 向けに書き換え
-          cat << 'EOF' > ios_toolchain.cmake
-          set(CMAKE_SYSTEM_NAME iOS)
-          set(CMAKE_OSX_ARCHITECTURES "arm64")
-          set(CMAKE_OSX_DEPLOYMENT_TARGET "15.0")
-          set(CMAKE_XCODE_ATTRIBUTE_ONLY_ACTIVE_ARCH NO)
-          set(CMAKE_IOS_INSTALL_COMBINED NO)
-          EOF
-
-      - name: Build LWJGL Core & Native Dylibs for iOS
-        run: |
-          cd lwjgl3
-          # Java側のコード生成とコンパイル
           ant compile-templates
           ant compile
 
-          # ネイティブC/C++部分をiOS SDK (arm64) 向けにコンパイル
+      - name: Compile liblwjgl.dylib for iOS (arm64)
+        working-directory: lwjgl3
+        run: |
+          IOS_SDK=$(xcrun --sdk iphoneos --show-sdk-path)
           mkdir -p bin/ios/arm64
+
           IOS_FLAGS="-arch arm64 -isysroot $IOS_SDK -miphoneos-version-min=15.0 -O3 -fPIC -shared"
 
-          # コアライブラリ (liblwjgl.dylib) のビルド
           clang $IOS_FLAGS \
             -Imodules/lwjgl/core/src/main/c \
             -Imodules/lwjgl/core/src/main/c/macos \
@@ -66,7 +59,6 @@ jobs:
             -framework Foundation -framework CoreFoundation \
             -o bin/ios/arm64/liblwjgl.dylib
 
-          # ビルドされたバイナリのアーキテクチャ確認
           file bin/ios/arm64/liblwjgl.dylib
           otool -l bin/ios/arm64/liblwjgl.dylib | grep -A 4 LC_BUILD_VERSION
 
