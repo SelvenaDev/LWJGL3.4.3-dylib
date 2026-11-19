@@ -26,7 +26,7 @@ jobs:
 
       - name: Install build dependencies
         run: |
-          brew install ant cmake ninja
+          brew install ant cmake ninja libffi
 
       - name: Initialize LWJGL build
         working-directory: lwjgl3
@@ -44,13 +44,32 @@ jobs:
         run: |
           IOS_SDK=$(xcrun --sdk iphoneos --show-sdk-path)
           mkdir -p bin/ios/arm64
+          mkdir -p ios_compat/objc
 
-          IOS_FLAGS="-arch arm64 -isysroot $IOS_SDK -miphoneos-version-min=15.0 -O3 -fPIC -shared -DLWJGL_MACOS -DLWJGL_ARM64"
+          # 1. iOS SDKに存在しない <objc/objc-runtime.h> の互換シムを作成
+          cat << 'EOF' > ios_compat/objc/objc-runtime.h
+          #pragma once
+          #include <objc/objc.h>
+          #include <objc/runtime.h>
+          #include <objc/message.h>
+          EOF
 
-          # 存在するCおよびObjective-Cソースファイルを自動収集
-          SRC_FILES=$(find modules/lwjgl/core/src/main/c modules/lwjgl/core/src/generated/c -maxdepth 2 \( -name "*.c" -o -name "*.m" \) ! -path "*/windows/*" ! -path "*/linux/*" ! -path "*/freebsd/*")
+          # 2. LWJGL内の libffi ヘッダ場所と静的ライブラリを探索
+          FFI_INC_DIRS=$(find modules/lwjgl/core -name "ffi.h" -exec dirname {} \; | sed 's/^/-I/' | tr '\n' ' ')
+          if [ -z "$FFI_INC_DIRS" ]; then
+            # 見つからない場合はiOS SDKまたはHomebrewのlibffiヘッダを補完
+            FFI_INC_DIRS="-I$IOS_SDK/usr/include/ffi -I$(brew --prefix libffi)/include"
+          fi
 
+          IOS_FLAGS="-arch arm64 -isysroot $IOS_SDK -miphoneos-version-min=15.0 -O3 -fPIC -shared -DLWJGL_MACOS -DLWJGL_ARM64 -ObjC"
+
+          # 3. 存在するCおよびObjective-Cソースファイルを自動収集
+          SRC_FILES=$(find modules/lwjgl/core/src/main/c modules/lwjgl/core/src/generated/c -maxdepth 3 \( -name "*.c" -o -name "*.m" \) ! -path "*/windows/*" ! -path "*/linux/*" ! -path "*/freebsd/*")
+
+          # 4. コンパイルとリンク（iOS標準の libffi と Objective-C ランタイムをリンク）
           clang $IOS_FLAGS \
+            -Iios_compat \
+            $FFI_INC_DIRS \
             -Imodules/lwjgl/core/src/main/c \
             -Imodules/lwjgl/core/src/main/c/macos \
             -Imodules/lwjgl/core/src/main/c/posix \
@@ -60,6 +79,7 @@ jobs:
             -I$JAVA_HOME/include \
             -I$JAVA_HOME/include/darwin \
             $SRC_FILES \
+            -lffi -lobjc \
             -framework Foundation -framework CoreFoundation \
             -o bin/ios/arm64/liblwjgl.dylib
 
