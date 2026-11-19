@@ -45,17 +45,21 @@ jobs:
           IOS_SDK=$(xcrun --sdk iphoneos --show-sdk-path)
           mkdir -p bin/ios/arm64
 
-          IOS_FLAGS="-arch arm64 -isysroot $IOS_SDK -miphoneos-version-min=15.0 -O3 -fPIC -shared"
+          IOS_FLAGS="-arch arm64 -isysroot $IOS_SDK -miphoneos-version-min=15.0 -O3 -fPIC -shared -DLWJGL_MACOS -DLWJGL_ARM64"
+
+          # 存在するCおよびObjective-Cソースファイルを自動収集
+          SRC_FILES=$(find modules/lwjgl/core/src/main/c modules/lwjgl/core/src/generated/c -maxdepth 2 \( -name "*.c" -o -name "*.m" \) ! -path "*/windows/*" ! -path "*/linux/*" ! -path "*/freebsd/*")
 
           clang $IOS_FLAGS \
             -Imodules/lwjgl/core/src/main/c \
             -Imodules/lwjgl/core/src/main/c/macos \
+            -Imodules/lwjgl/core/src/main/c/posix \
             -Imodules/lwjgl/core/src/generated/c \
+            -Imodules/lwjgl/core/src/generated/c/macos \
+            -Imodules/lwjgl/core/src/generated/c/posix \
             -I$JAVA_HOME/include \
             -I$JAVA_HOME/include/darwin \
-            modules/lwjgl/core/src/main/c/*.c \
-            modules/lwjgl/core/src/main/c/macos/*.c \
-            modules/lwjgl/core/src/generated/c/*.c \
+            $SRC_FILES \
             -framework Foundation -framework CoreFoundation \
             -o bin/ios/arm64/liblwjgl.dylib
 
