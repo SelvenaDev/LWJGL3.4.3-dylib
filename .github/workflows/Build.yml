@@ -1,4 +1,4 @@
-name: Build LWJGL 3.4.3 for iOS (arm64)
+name: Build LWJGL 3.4.3 for iOS (arm64) v2
 
 on:
   workflow_dispatch:
@@ -24,20 +24,14 @@ jobs:
       - name: Install ant
         run: brew install ant
 
-      - name: Inspect (build config and libffi layout)
-        working-directory: lwjgl3
-        run: |
-          find . -name "ffitarget.h" | head
-          ls config/macos || true
-          grep -n "mmacosx\|arch\|isysroot\|framework" config/macos/build.xml | head -60 || true
-
-      # clang/gcc/cc をラッパーに差し替え、iOS用フラグを強制する
-      - name: Create iOS clang wrapper
+      # clang / clang++ の両方をラッパーにして、コンパイルもリンクもiOS向けに固定する
+      - name: Create iOS compiler wrappers
         run: |
           IOS_SDK=$(xcrun --sdk iphoneos --show-sdk-path)
-          REAL_CLANG=$(xcrun --sdk iphoneos -f clang)
           mkdir -p $HOME/ioswrap
-          cat > $HOME/ioswrap/clang << EOF
+          for tool in clang clang++; do
+            REAL=$(xcrun --sdk iphoneos -f $tool)
+            cat > $HOME/ioswrap/$tool << EOF
           #!/bin/bash
           args=()
           skip=0
@@ -47,20 +41,36 @@ jobs:
               -mmacosx-version-min=*) ;;
               -arch) skip=1 ;;
               -isysroot) skip=1 ;;
+              -framework) skip=2 ;;
               *) args+=("\$a") ;;
             esac
           done
-          exec "$REAL_CLANG" -arch arm64 -isysroot "$IOS_SDK" -miphoneos-version-min=15.0 "\${args[@]}"
+          exec "$REAL" -arch arm64 -isysroot "$IOS_SDK" -miphoneos-version-min=15.0 "\${args[@]}"
           EOF
-          chmod +x $HOME/ioswrap/clang
-          ln -sf $HOME/ioswrap/clang $HOME/ioswrap/gcc
-          ln -sf $HOME/ioswrap/clang $HOME/ioswrap/cc
+            chmod +x $HOME/ioswrap/$tool
+          done
+          ln -sf $HOME/ioswrap/clang   $HOME/ioswrap/gcc
+          ln -sf $HOME/ioswrap/clang   $HOME/ioswrap/cc
+          ln -sf $HOME/ioswrap/clang++ $HOME/ioswrap/g++
+          ln -sf $HOME/ioswrap/clang++ $HOME/ioswrap/c++
           echo "$HOME/ioswrap" >> $GITHUB_PATH
+
+      # iOS SDKに無い <objc/objc-runtime.h> を補う(coreのObjCRuntime.cが要求)
+      - name: Create objc-runtime.h shim
+        run: |
+          mkdir -p $HOME/iosshim/objc
+          cat > $HOME/iosshim/objc/objc-runtime.h << 'EOF'
+          #pragma once
+          #include <objc/objc.h>
+          #include <objc/runtime.h>
+          #include <objc/message.h>
+          EOF
+          echo "CPATH=$HOME/iosshim:$GITHUB_WORKSPACE/lwjgl3/modules/lwjgl/core/src/main/c/libffi" >> $GITHUB_ENV
 
       - name: Build templates and Java classes
         working-directory: lwjgl3
         run: |
-          ant -Dbinding.skip=true init || ant init
+          ant init
           ant compile-templates
           ant compile
 
@@ -68,21 +78,19 @@ jobs:
         working-directory: lwjgl3
         continue-on-error: true
         run: |
-          # libffi の ffitarget.h をインクルードパスに通す
-          FFI_T=$(find modules/lwjgl/core -name "ffitarget.h" | grep -i "aarch64\|arm64" | head -1)
-          if [ -n "$FFI_T" ]; then
-            export CPATH="$(dirname $FFI_T):$CPATH"
-          fi
-          export CPATH="$PWD/modules/lwjgl/core/src/main/c/libffi:$CPATH"
           ant -Dplatform=macos -Dos.arch=arm64 compile-native 2>&1 | tee ../native-build.log
 
       - name: Collect outputs
         if: always()
         run: |
           mkdir -p out
-          find lwjgl3/bin -name "*.dylib" -exec cp {} out/ \; || true
+          find lwjgl3/bin/libs -name "*.dylib" -exec cp {} out/ \; || true
           cp native-build.log out/ || true
-          for f in out/*.dylib; do [ -f "$f" ] && (file "$f"; otool -l "$f" | grep -A4 LC_BUILD_VERSION) ; done || true
+          # プラットフォーム確認 (iOS = platform 2)
+          for f in out/*.dylib; do
+            echo "== $f"; vtool -show-build "$f" 2>/dev/null | grep -E "platform|minos" || true
+          done
+          ls -la out
 
       - name: Upload
         if: always()
