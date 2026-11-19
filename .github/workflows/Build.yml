@@ -1,4 +1,4 @@
-name: Build LWJGL 3.4.3 for iOS (arm64) v2
+name: Build LWJGL 3.4.3 for iOS (arm64) v3
 
 on:
   workflow_dispatch:
@@ -73,10 +73,34 @@ jobs:
           ant compile-templates
           ant compile
 
+      # LWJGLのコアは build.lwjgl.org から macOS用 libffi.a を落としてリンクするため、iOSでは使えない。
+      # iOS用libffi.aを自前で作り、オフラインモードで差し込む。
+      - name: Build libffi.a for iOS arm64
+        run: |
+          IOS_SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          unset CPATH
+          curl -sL https://github.com/libffi/libffi/releases/download/v3.4.6/libffi-3.4.6.tar.gz | tar xz
+          cd libffi-3.4.6
+          ./configure --host=aarch64-apple-darwin --disable-shared --enable-static \
+            --disable-docs --disable-multi-os-directory \
+            CC="$(xcrun --sdk iphoneos -f clang)" \
+            CFLAGS="-arch arm64 -isysroot $IOS_SDK -miphoneos-version-min=15.0 -O2 -fPIC" \
+            LDFLAGS="-arch arm64 -isysroot $IOS_SDK"
+          make -j4
+          find . -name "libffi.a" | head
+          D=$GITHUB_WORKSPACE/lwjgl3/bin/libs/native/macos/arm64/org/lwjgl
+          mkdir -p $D
+          cp "$(find . -name libffi.a | head -1)" $D/libffi.a
+          lipo -info $D/libffi.a
+          vtool -show-build $D/libffi.a | head -20 || true
+
       - name: Build native (iOS arm64)
         working-directory: lwjgl3
         continue-on-error: true
         run: |
+          # coreの -Werror -pedantic がiOS SDKで警告→エラーになるのを避ける
+          sed -i 's/-Werror -Wfatal-errors/-Wno-error/g' config/macos/build.xml
+          export LWJGL_BUILD_OFFLINE=true
           ant -Dplatform=macos -Dos.arch=arm64 compile-native 2>&1 | tee ../native-build.log
 
       - name: Collect outputs
@@ -84,6 +108,7 @@ jobs:
         run: |
           mkdir -p out
           find lwjgl3/bin/libs -name "*.dylib" -exec cp {} out/ \; || true
+          cp lwjgl3/bin/libs/native/macos/arm64/org/lwjgl/libffi.a out/ || true
           cp native-build.log out/ || true
           # プラットフォーム確認 (iOS = platform 2)
           for f in out/*.dylib; do
