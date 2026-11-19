@@ -41,7 +41,6 @@ jobs:
               -mmacosx-version-min=*) ;;
               -arch) skip=1 ;;
               -isysroot) skip=1 ;;
-              -framework) skip=2 ;;
               *) args+=("\$a") ;;
             esac
           done
