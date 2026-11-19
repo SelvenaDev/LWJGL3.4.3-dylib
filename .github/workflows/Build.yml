@@ -4,14 +4,11 @@ on:
   workflow_dispatch:
 
 jobs:
-  build-ios-dylib:
+  build:
     runs-on: macos-15
 
     steps:
-      - name: Checkout workflow repo
-        uses: actions/checkout@v4
-
-      - name: Checkout LWJGL 3.4.3 source
+      - name: Checkout LWJGL 3.4.3
         uses: actions/checkout@v4
         with:
           repository: LWJGL/lwjgl3
@@ -24,70 +21,72 @@ jobs:
           distribution: 'temurin'
           java-version: '21'
 
-      - name: Install build dependencies
-        run: |
-          brew install ant cmake ninja libffi
+      - name: Install ant
+        run: brew install ant
 
-      - name: Initialize LWJGL build
+      - name: Inspect (build config and libffi layout)
         working-directory: lwjgl3
         run: |
-          ant init
+          find . -name "ffitarget.h" | head
+          ls config/macos || true
+          grep -n "mmacosx\|arch\|isysroot\|framework" config/macos/build.xml | head -60 || true
 
-      - name: Build LWJGL Java classes and generated C headers
+      # clang/gcc/cc をラッパーに差し替え、iOS用フラグを強制する
+      - name: Create iOS clang wrapper
+        run: |
+          IOS_SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          REAL_CLANG=$(xcrun --sdk iphoneos -f clang)
+          mkdir -p $HOME/ioswrap
+          cat > $HOME/ioswrap/clang << EOF
+          #!/bin/bash
+          args=()
+          skip=0
+          for a in "\$@"; do
+            if [ \$skip -eq 1 ]; then skip=0; continue; fi
+            case "\$a" in
+              -mmacosx-version-min=*) ;;
+              -arch) skip=1 ;;
+              -isysroot) skip=1 ;;
+              *) args+=("\$a") ;;
+            esac
+          done
+          exec "$REAL_CLANG" -arch arm64 -isysroot "$IOS_SDK" -miphoneos-version-min=15.0 "\${args[@]}"
+          EOF
+          chmod +x $HOME/ioswrap/clang
+          ln -sf $HOME/ioswrap/clang $HOME/ioswrap/gcc
+          ln -sf $HOME/ioswrap/clang $HOME/ioswrap/cc
+          echo "$HOME/ioswrap" >> $GITHUB_PATH
+
+      - name: Build templates and Java classes
         working-directory: lwjgl3
         run: |
+          ant -Dbinding.skip=true init || ant init
           ant compile-templates
           ant compile
 
-      - name: Compile liblwjgl.dylib for iOS (arm64)
+      - name: Build native (iOS arm64)
         working-directory: lwjgl3
+        continue-on-error: true
         run: |
-          IOS_SDK=$(xcrun --sdk iphoneos --show-sdk-path)
-          mkdir -p bin/ios/arm64
-          mkdir -p ios_compat/objc
-
-          # 1. iOS SDKに存在しない <objc/objc-runtime.h> の互換シムを作成
-          cat << 'EOF' > ios_compat/objc/objc-runtime.h
-          #pragma once
-          #include <objc/objc.h>
-          #include <objc/runtime.h>
-          #include <objc/message.h>
-          EOF
-
-          # 2. LWJGL内の libffi ヘッダ場所と静的ライブラリを探索
-          FFI_INC_DIRS=$(find modules/lwjgl/core -name "ffi.h" -exec dirname {} \; | sed 's/^/-I/' | tr '\n' ' ')
-          if [ -z "$FFI_INC_DIRS" ]; then
-            # 見つからない場合はiOS SDKまたはHomebrewのlibffiヘッダを補完
-            FFI_INC_DIRS="-I$IOS_SDK/usr/include/ffi -I$(brew --prefix libffi)/include"
+          # libffi の ffitarget.h をインクルードパスに通す
+          FFI_T=$(find modules/lwjgl/core -name "ffitarget.h" | grep -i "aarch64\|arm64" | head -1)
+          if [ -n "$FFI_T" ]; then
+            export CPATH="$(dirname $FFI_T):$CPATH"
           fi
+          export CPATH="$PWD/modules/lwjgl/core/src/main/c/libffi:$CPATH"
+          ant -Dplatform=macos -Dos.arch=arm64 compile-native 2>&1 | tee ../native-build.log
 
-          IOS_FLAGS="-arch arm64 -isysroot $IOS_SDK -miphoneos-version-min=15.0 -O3 -fPIC -shared -DLWJGL_MACOS -DLWJGL_ARM64 -ObjC"
+      - name: Collect outputs
+        if: always()
+        run: |
+          mkdir -p out
+          find lwjgl3/bin -name "*.dylib" -exec cp {} out/ \; || true
+          cp native-build.log out/ || true
+          for f in out/*.dylib; do [ -f "$f" ] && (file "$f"; otool -l "$f" | grep -A4 LC_BUILD_VERSION) ; done || true
 
-          # 3. 存在するCおよびObjective-Cソースファイルを自動収集
-          SRC_FILES=$(find modules/lwjgl/core/src/main/c modules/lwjgl/core/src/generated/c -maxdepth 3 \( -name "*.c" -o -name "*.m" \) ! -path "*/windows/*" ! -path "*/linux/*" ! -path "*/freebsd/*")
-
-          # 4. コンパイルとリンク（iOS標準の libffi と Objective-C ランタイムをリンク）
-          clang $IOS_FLAGS \
-            -Iios_compat \
-            $FFI_INC_DIRS \
-            -Imodules/lwjgl/core/src/main/c \
-            -Imodules/lwjgl/core/src/main/c/macos \
-            -Imodules/lwjgl/core/src/main/c/posix \
-            -Imodules/lwjgl/core/src/generated/c \
-            -Imodules/lwjgl/core/src/generated/c/macos \
-            -Imodules/lwjgl/core/src/generated/c/posix \
-            -I$JAVA_HOME/include \
-            -I$JAVA_HOME/include/darwin \
-            $SRC_FILES \
-            -lffi -lobjc \
-            -framework Foundation -framework CoreFoundation \
-            -o bin/ios/arm64/liblwjgl.dylib
-
-          file bin/ios/arm64/liblwjgl.dylib
-          otool -l bin/ios/arm64/liblwjgl.dylib | grep -A 4 LC_BUILD_VERSION
-
-      - name: Upload iOS dylib artifacts
+      - name: Upload
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: lwjgl-3.4.3-ios-arm64-dylibs
-          path: lwjgl3/bin/ios/arm64/*.dylib
+          name: lwjgl-3.4.3-ios
+          path: out/
