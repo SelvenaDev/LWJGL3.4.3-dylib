@@ -86,6 +86,9 @@ jobs:
             CC="$(xcrun --sdk iphoneos -f clang)" \
             CFLAGS="-arch arm64 -isysroot $IOS_SDK -miphoneos-version-min=15.0 -O2 -fPIC" \
             LDFLAGS="-arch arm64 -isysroot $IOS_SDK"
+          # Apple clangがsysv.SのCFIディレクティブを受け付けないため、CFIを無効化する
+          find . -name fficonfig.h -exec sed -i.bak 's/^#define HAVE_AS_CFI_PSEUDO_OP 1/\/* CFI disabled *\//' {} \;
+          grep -rn "CFI" $(find . -name fficonfig.h) || true
           make -j4
           find . -name "libffi.a" | head
           D=$GITHUB_WORKSPACE/lwjgl3/bin/libs/native/macos/arm64/org/lwjgl
